@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: fashionstore_db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_DB: fashionstore_ar
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  api:
+    build: .
+    container_name: fashionstore_api
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgrespassword@db:5432/fashionstore_ar
+      - API_BASE_URL=http://34.230.18.9:8000
+    volumes:
+      - uploads_data:/code/uploads
+    depends_on:
+      - db
+    # Ejecutamos las migraciones automticamente antes de levantar el servidor
+    command: >
+      bash -c "alembic upgrade head && 
+               uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+volumes:
+  postgres_data:
+  uploads_data:
