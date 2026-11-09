@@ -1,7 +1,17 @@
-from sqlalchemy import Column, Integer, Float, ForeignKey, DateTime, String, Boolean, Text
+from sqlalchemy import (
+    Column,
+    Integer,
+    Float,
+    ForeignKey,
+    DateTime,
+    String,
+    Boolean,
+    Text,
+)
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 from datetime import datetime
+
 
 class Venta(Base):
     __tablename__ = "ventas"
@@ -9,9 +19,10 @@ class Venta(Base):
     fecha = Column(DateTime, default=datetime.utcnow)
     total = Column(Float, default=0.0)
     usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    responsable_id = Column(Integer, ForeignKey("usuarios.id"), nullable=True)
     sucursal_id = Column(Integer, ForeignKey("sucursales.id"))
-    empresa_id = Column(Integer, ForeignKey("empresas.id"), nullable=True) # Tenant
-    
+    empresa_id = Column(Integer, ForeignKey("empresas.id"), nullable=True)  # Tenant
+
     operacion_uuid = Column(String(36), unique=True, index=True, nullable=True)
     estado_sincronizacion = Column(String(50), default="CONFIRMADA")
     motivo_rechazo = Column(String(255), nullable=True)
@@ -21,12 +32,15 @@ class Venta(Base):
     transaccion_id = Column(String(100), nullable=True)
     tipo_entrega = Column(String(50), default="Recojo en Tienda")
     direccion_envio = Column(String(255), nullable=True)
-    
-    detalles = relationship("DetalleVenta", back_populates="venta", cascade="all, delete-orphan")
-    usuario = relationship("Usuario")
+
+    detalles = relationship(
+        "DetalleVenta", back_populates="venta", cascade="all, delete-orphan"
+    )
+    usuario = relationship("Usuario", foreign_keys=[usuario_id])
     sucursal = relationship("Sucursal")
     empresa = relationship("Empresa")
     cambios = relationship("CambioPrenda", back_populates="venta")
+
 
 class DetalleVenta(Base):
     __tablename__ = "detalle_ventas"
@@ -44,6 +58,7 @@ class DetalleVenta(Base):
     talla = relationship("Talla")
     color = relationship("Color")
 
+
 class CambioPrenda(Base):
     __tablename__ = "cambios_prendas"
     id = Column(Integer, primary_key=True, index=True)
@@ -52,17 +67,17 @@ class CambioPrenda(Base):
     sucursal_id = Column(Integer, ForeignKey("sucursales.id"), nullable=False)
     usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=True)
     fecha_cambio = Column(DateTime, default=datetime.utcnow)
-    
+
     producto_devuelto_id = Column(Integer, ForeignKey("productos.id"), nullable=False)
     talla_devuelta_id = Column(Integer, ForeignKey("tallas.id"), nullable=False)
     color_devuelto_id = Column(Integer, ForeignKey("colores.id"), nullable=False)
     cantidad_devuelta = Column(Integer, default=1)
-    
+
     producto_nuevo_id = Column(Integer, ForeignKey("productos.id"), nullable=False)
     talla_nueva_id = Column(Integer, ForeignKey("tallas.id"), nullable=False)
     color_nuevo_id = Column(Integer, ForeignKey("colores.id"), nullable=False)
     cantidad_nueva = Column(Integer, default=1)
-    
+
     diferencia_precio = Column(Float, default=0.0)
     motivo = Column(String(255), nullable=True)
     estado = Column(String(50), default="Aprobado")

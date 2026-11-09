@@ -1,9 +1,14 @@
-from fastapi import FastAPI
+from dotenv import load_dotenv
+load_dotenv()
+
+from fastapi import FastAPI, Depends
+from app.core.access import authorize
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import os
 
 from app.core.database import Base, engine, SessionLocal
+
 # Importar todos los modelos para registro en SQLAlchemy
 import app.pkg_saas.models
 import app.pkg_seguridad.models
@@ -15,14 +20,17 @@ import app.pkg_devoluciones.models
 import app.pkg_delivery.models
 import app.pkg_ia.models
 import app.pkg_pagos.models
+import app.pkg_comercial.models
+import app.pkg_bitacora
 
 # Crear tablas automáticamente si no existen
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
+    dependencies=[Depends(authorize)],
     title="FashionStore SaaS & AR - API",
     description="Backend para la plataforma de comercio electrónico SaaS Multitenant, PWA Offline y Analítica IA",
-    version="2.0.0"
+    version="2.0.0",
 )
 
 # Configuración de CORS
@@ -34,23 +42,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.on_event("startup")
 def startup_event():
     # Inicializar planes SaaS por defecto (Básico y Profesional)
     db = SessionLocal()
     try:
         from app.pkg_saas.services import inicializar_planes_default
+
         inicializar_planes_default(db)
     finally:
         db.close()
+
 
 @app.get("/")
 def read_root():
     return {
         "message": "Bienvenido a la API de FashionStore SaaS Multitenant",
         "version": "2.0.0",
-        "status": "online"
+        "status": "online",
     }
+
 
 # Asegurar que exista la carpeta uploads
 os.makedirs("uploads", exist_ok=True)
@@ -81,3 +93,15 @@ app.include_router(delivery_router.router, prefix="/api/v1")
 app.include_router(ia_router, prefix="/api/v1/ia")
 app.include_router(pagos_router, prefix="/api/v1/pagos")
 
+
+from app.pkg_comercial.router import (
+    router as comercial_router,
+    cliente as cliente_router,
+)
+
+app.include_router(comercial_router, prefix="/api/v1")
+app.include_router(cliente_router, prefix="/api/v1")
+
+from app.pkg_bitacora.router import router as bitacora_router
+
+app.include_router(bitacora_router, prefix="/api/v1/bitacora")

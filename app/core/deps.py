@@ -11,7 +11,10 @@ from app.pkg_seguridad import models
 # Configura OAuth2 para extraer el token del header "Authorization: Bearer <token>"
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/v1/seguridad/login")
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+
+def get_current_user(
+    token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
+):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="No se pudieron validar las credenciales",
@@ -25,13 +28,14 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
             raise credentials_exception
     except JWTError:
         raise credentials_exception
-        
+
     # Buscar el usuario en la BD
     user = db.query(models.Usuario).filter(models.Usuario.email == email).first()
-    if user is None:
+    if user is None or not user.is_active:
         raise credentials_exception
-        
+
     return user
+
 
 class RoleChecker:
     def __init__(self, allowed_roles: List[str]):
@@ -42,6 +46,6 @@ class RoleChecker:
         if user.rol.nombre not in self.allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Operación no permitida. Requiere rol: {self.allowed_roles}"
+                detail=f"Operación no permitida. Requiere rol: {self.allowed_roles}",
             )
         return user

@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings
 
+
 class Settings(BaseSettings):
     PROJECT_NAME: str = "FashionStore AR API"
     DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/fashionstore_ar"
@@ -7,5 +8,7 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        extra = "ignore"
+
 
 settings = Settings()

@@ -8,3 +8,8 @@ bcrypt
 python-jose[cryptography]
 stripe
 Pillow
+numpy
+scikit-learn
+openpyxl
+reportlab
+httpx

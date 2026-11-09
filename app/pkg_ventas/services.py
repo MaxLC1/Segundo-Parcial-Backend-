@@ -2,250 +2,198 @@ from sqlalchemy.orm import Session
 from fastapi import HTTPException
 from typing import List, Optional
 from datetime import datetime, timedelta
-
 from . import models, schemas
 from app.pkg_sucursales.models import Inventario, Sucursal
 from app.pkg_catalogo.models import Producto
 
+
 def create_venta(db: Session, venta: schemas.VentaCreate):
-    # 1. Verificación de Idempotencia (RNF05): si ya existe la venta con este operacion_uuid, retornarla
-    if venta.operacion_uuid:
-        venta_existente = db.query(models.Venta).filter_by(operacion_uuid=venta.operacion_uuid).first()
-        if venta_existente:
-            return venta_existente
-
-    # Obtener empresa_id si no vino en el payload
-    empresa_id = venta.empresa_id
-    if not empresa_id:
-        sucursal = db.query(Sucursal).filter_by(id=venta.sucursal_id).first()
-        if sucursal:
-            empresa_id = sucursal.empresa_id
-
-    # 2. Calcular total y verificar inventario
-    total_venta = 0.0
-    for det in venta.detalles:
-        inv = db.query(Inventario).filter(
-            Inventario.sucursal_id == venta.sucursal_id,
-            Inventario.producto_id == det.producto_id,
-            Inventario.talla_id == det.talla_id,
-            Inventario.color_id == det.color_id
-        ).first()
-        
-        if not inv or inv.cantidad < det.cantidad:
-            raise HTTPException(status_code=400, detail=f"Stock insuficiente para producto ID {det.producto_id}")
-            
-        inv.cantidad -= det.cantidad
-        total_venta += det.cantidad * det.precio_unitario
-        
-    # 3. Crear venta
-    db_venta = models.Venta(
-        total=total_venta,
-        usuario_id=venta.usuario_id,
-        sucursal_id=venta.sucursal_id,
-        empresa_id=empresa_id,
-        metodo_pago=venta.metodo_pago,
-        transaccion_id=venta.transaccion_id,
-        tipo_entrega=venta.tipo_entrega,
-        direccion_envio=venta.direccion_envio,
-        operacion_uuid=venta.operacion_uuid,
-        origen=venta.origen or "ONLINE",
-        estado_sincronizacion="CONFIRMADA",
-        fecha=venta.fecha or datetime.utcnow()
+    # A branch lock serializes inventory changes, including retry checks.
+    sucursal = (
+        db.query(Sucursal).filter_by(id=venta.sucursal_id).with_for_update().first()
     )
-    db.add(db_venta)
-    db.commit()
-    db.refresh(db_venta)
-    
-    # 4. Crear detalles
-    for det in venta.detalles:
-        db_det = models.DetalleVenta(
-            venta_id=db_venta.id,
-            producto_id=det.producto_id,
-            talla_id=det.talla_id,
-            color_id=det.color_id,
-            cantidad=det.cantidad,
-            precio_unitario=det.precio_unitario,
-            subtotal=det.cantidad * det.precio_unitario
+    if not sucursal:
+        raise HTTPException(404, "Sucursal no disponible")
+    if venta.empresa_id not in (None, sucursal.empresa_id):
+        raise HTTPException(403, "Empresa y sucursal no coinciden")
+    if venta.operacion_uuid:
+        previous = (
+            db.query(models.Venta)
+            .filter_by(operacion_uuid=venta.operacion_uuid)
+            .first()
         )
-        db.add(db_det)
-        
-    db.commit()
-    db.refresh(db_venta)
+        if previous:
+            return previous
+    if venta.origen != "ONLINE" and venta.metodo_pago.lower() not in {
+        "efectivo",
+        "contado",
+    }:
+        raise HTTPException(400, "Las ventas offline solo admiten efectivo")
+    total = 0
+    details = []
+    try:
+        for det in venta.detalles:
+            producto = db.query(Producto).filter_by(id=det.producto_id).first()
+            if not producto or producto.empresa_id != sucursal.empresa_id:
+                raise HTTPException(403, "Producto ajeno a la empresa")
+            if db.info.get("role") == "Cliente":
+                from app.pkg_catalogo.models import ReglaOferta
 
-    # 5. Si es Delivery, crear la orden de servicio
-    if venta.tipo_entrega == "Delivery":
-        from app.pkg_delivery.models import ServicioDelivery
-        db_delivery = ServicioDelivery(
-            venta_id=db_venta.id,
-            empresa_id=empresa_id,
-            estado="Pendiente"
-        )
-        db.add(db_delivery)
-        db.commit()
-
-    return db_venta
-
-def sincronizar_ventas_lote(db: Session, lote: schemas.SincronizacionLoteRequest) -> schemas.SincronizacionLoteResponse:
-    """Procesa un lote de operaciones offline respetando idempotencia y detectando conflictos (Desafío II y IV)."""
-    resultados: List[schemas.ResultadoSincronizacionItem] = []
-    confirmadas = 0
-    rechazadas = 0
-    duplicadas = 0
-
-    for venta_in in lote.ventas:
-        uuid_op = venta_in.operacion_uuid or f"offline-{datetime.utcnow().timestamp()}"
-        
-        # 1. Idempotencia: Verificar si ya existe en la BD
-        existente = db.query(models.Venta).filter_by(operacion_uuid=uuid_op).first()
-        if existente:
-            duplicadas += 1
-            resultados.append(schemas.ResultadoSincronizacionItem(
-                operacion_uuid=uuid_op,
-                estado="CONFIRMADA",
-                mensaje="Operación previamente confirmada (Idempotente)",
-                id_generado=existente.id
-            ))
-            continue
-
-        # 2. Verificar consistencia de stock en la sucursal
-        conflicto = None
-        for det in venta_in.detalles:
-            inv = db.query(Inventario).filter(
-                Inventario.sucursal_id == venta_in.sucursal_id,
-                Inventario.producto_id == det.producto_id,
-                Inventario.talla_id == det.talla_id,
-                Inventario.color_id == det.color_id
-            ).first()
-            if not inv or inv.cantidad < det.cantidad:
-                disp = inv.cantidad if inv else 0
-                conflicto = f"Conflicto de stock: Producto ID {det.producto_id} requiere {det.cantidad}, disponible: {disp}"
-                break
-
-        if conflicto:
-            # Registrar como rechazada por conflicto sin alterar inventario
-            rechazadas += 1
-            db_venta_rechazada = models.Venta(
-                total=sum(d.cantidad * d.precio_unitario for d in venta_in.detalles),
-                usuario_id=venta_in.usuario_id,
-                sucursal_id=venta_in.sucursal_id,
-                empresa_id=venta_in.empresa_id or lote.empresa_id,
-                metodo_pago=venta_in.metodo_pago,
-                operacion_uuid=uuid_op,
-                origen=venta_in.origen or "PWA_OFFLINE",
-                estado_sincronizacion="RECHAZADA_CONFLICTO",
-                motivo_rechazo=conflicto,
-                fecha=venta_in.fecha or datetime.utcnow()
+                discount = producto.descuento_porcentaje or 0
+                age = producto.antiguedad_temporadas or 0
+                if age:
+                    seasonal = 30 if age == 1 else 60
+                    for rule in (
+                        db.query(ReglaOferta)
+                        .filter_by(activa=True, tipo="TEMPORADA_PASADA")
+                        .all()
+                    ):
+                        if rule.antiguedad_temporadas == age or (
+                            age >= 2 and rule.antiguedad_temporadas >= 2
+                        ):
+                            seasonal = rule.descuento_porcentaje
+                    discount = max(discount, seasonal)
+                offered = round(
+                    producto.precio * (1 - min(100, max(0, discount)) / 100), 2
+                )
+                if round(det.precio_unitario, 2) not in {
+                    round(producto.precio, 2),
+                    offered,
+                }:
+                    raise HTTPException(
+                        409, "El precio cambió o es inválido; actualice el catálogo"
+                    )
+            inv = (
+                db.query(Inventario)
+                .filter_by(
+                    sucursal_id=sucursal.id,
+                    producto_id=det.producto_id,
+                    talla_id=det.talla_id,
+                    color_id=det.color_id,
+                )
+                .with_for_update()
+                .first()
             )
-            db.add(db_venta_rechazada)
-            db.commit()
-            resultados.append(schemas.ResultadoSincronizacionItem(
-                operacion_uuid=uuid_op,
-                estado="RECHAZADA_CONFLICTO",
-                mensaje=conflicto,
-                id_generado=db_venta_rechazada.id
-            ))
+            if not inv or inv.cantidad < det.cantidad:
+                raise HTTPException(
+                    409, f"Stock insuficiente para producto {det.producto_id}"
+                )
+            inv.cantidad -= det.cantidad
+            subtotal = round(det.cantidad * det.precio_unitario, 2)
+            total += subtotal
+            details.append(models.DetalleVenta(**det.model_dump(), subtotal=subtotal))
+        record = models.Venta(
+            total=round(total, 2),
+            usuario_id=venta.usuario_id,
+            responsable_id=db.info["actor"].id
+            if db.info.get("actor")
+            else venta.usuario_id,
+            sucursal_id=sucursal.id,
+            empresa_id=sucursal.empresa_id,
+            metodo_pago=venta.metodo_pago,
+            transaccion_id=venta.transaccion_id,
+            tipo_entrega=venta.tipo_entrega,
+            direccion_envio=venta.direccion_envio,
+            operacion_uuid=venta.operacion_uuid,
+            origen=venta.origen,
+            estado_sincronizacion="CONFIRMADA",
+            fecha=venta.fecha or datetime.utcnow(),
+            detalles=details,
+        )
+        db.add(record)
+        db.flush()
+        if venta.cupon_codigo:
+            from app.pkg_comercial.services import aplicar_cupon
+
+            aplicar_cupon(db, venta.cupon_codigo, record, details)
+        from app.pkg_pagos.audit import registrar_cobro
+
+        registrar_cobro(db, record)
+        if venta.tipo_entrega == "Delivery":
+            from app.pkg_delivery.models import ServicioDelivery
+
+            db.add(
+                ServicioDelivery(
+                    venta_id=record.id,
+                    empresa_id=sucursal.empresa_id,
+                    estado="Pendiente",
+                )
+            )
+        db.commit()
+        db.refresh(record)
+        return record
+    except Exception:
+        db.rollback()
+        raise
+
+
+def sincronizar_ventas_lote(db: Session, lote: schemas.SincronizacionLoteRequest):
+    resultados = []
+    confirmadas = rechazadas = duplicadas = 0
+    for item in lote.ventas:
+        if not item.operacion_uuid:
+            raise HTTPException(422, "Cada operación offline requiere UUID")
+        item.origen = item.origen if item.origen != "ONLINE" else "PWA_OFFLINE"
+        previous = (
+            db.query(models.Venta).filter_by(operacion_uuid=item.operacion_uuid).first()
+        )
+        if previous:
+            duplicadas += 1
+            resultados.append(
+                schemas.ResultadoSincronizacionItem(
+                    operacion_uuid=item.operacion_uuid,
+                    estado=previous.estado_sincronizacion,
+                    mensaje=previous.motivo_rechazo
+                    or "Operación previamente confirmada",
+                    id_generado=previous.id,
+                )
+            )
             continue
-
-        # 3. Operación aceptada: descontar stock y guardar
         try:
-            db_venta = create_venta(db, venta_in)
+            record = create_venta(db, item)
             confirmadas += 1
-            resultados.append(schemas.ResultadoSincronizacionItem(
-                operacion_uuid=uuid_op,
-                estado="CONFIRMADA",
-                mensaje="Venta sincronizada y stock actualizado exitosamente",
-                id_generado=db_venta.id
-            ))
-        except Exception as e:
+            resultados.append(
+                schemas.ResultadoSincronizacionItem(
+                    operacion_uuid=item.operacion_uuid,
+                    estado="CONFIRMADA",
+                    mensaje="Venta confirmada",
+                    id_generado=record.id,
+                )
+            )
+        except HTTPException as exc:
+            db.rollback()
             rechazadas += 1
-            resultados.append(schemas.ResultadoSincronizacionItem(
-                operacion_uuid=uuid_op,
-                estado="RECHAZADA_CONFLICTO",
-                mensaje=f"Error durante sincronización: {str(e)}"
-            ))
-
+            resultados.append(
+                schemas.ResultadoSincronizacionItem(
+                    operacion_uuid=item.operacion_uuid,
+                    estado="RECHAZADA_CONFLICTO",
+                    mensaje=str(exc.detail),
+                )
+            )
+        except Exception:
+            db.rollback()
+            resultados.append(
+                schemas.ResultadoSincronizacionItem(
+                    operacion_uuid=item.operacion_uuid,
+                    estado="ERROR_REINTENTABLE",
+                    mensaje="Fallo temporal; conserve la operación y reintente",
+                )
+            )
     return schemas.SincronizacionLoteResponse(
         total=len(lote.ventas),
         confirmadas=confirmadas,
         rechazadas=rechazadas,
         duplicadas_ignoradas=duplicadas,
-        resultados=resultados
+        resultados=resultados,
     )
+
 
 def registrar_cambio_prenda(db: Session, cambio: schemas.CambioPrendaCreate):
-    """Gestiona cambios de prendas en un determinado plazo (Desafío IV - Req 7.2)."""
-    venta = db.query(models.Venta).filter_by(id=cambio.venta_id).first()
-    if not venta:
-        raise HTTPException(status_code=404, detail="Venta original no encontrada")
-
-    # Validar plazo de cambio (ej. máximo 30 días)
-    dias_transcurridos = (datetime.utcnow() - venta.fecha).days
-    if dias_transcurridos > 30:
-        raise HTTPException(
-            status_code=400,
-            detail=f"El plazo máximo para cambios es de 30 días. Han transcurrido {dias_transcurridos} días desde la compra."
-        )
-
-    # 1. Devolver prenda anterior al inventario de la sucursal
-    inv_devuelto = db.query(Inventario).filter(
-        Inventario.sucursal_id == cambio.sucursal_id,
-        Inventario.producto_id == cambio.producto_devuelto_id,
-        Inventario.talla_id == cambio.talla_devuelta_id,
-        Inventario.color_id == cambio.color_devuelto_id
-    ).first()
-    if inv_devuelto:
-        inv_devuelto.cantidad += cambio.cantidad_devuelta
-    else:
-        inv_devuelto = Inventario(
-            sucursal_id=cambio.sucursal_id,
-            producto_id=cambio.producto_devuelto_id,
-            talla_id=cambio.talla_devuelta_id,
-            color_id=cambio.color_devuelto_id,
-            cantidad=cambio.cantidad_devuelta
-        )
-        db.add(inv_devuelto)
-
-    # 2. Verificar y descontar stock de la nueva prenda
-    inv_nuevo = db.query(Inventario).filter(
-        Inventario.sucursal_id == cambio.sucursal_id,
-        Inventario.producto_id == cambio.producto_nuevo_id,
-        Inventario.talla_id == cambio.talla_nueva_id,
-        Inventario.color_id == cambio.color_nuevo_id
-    ).first()
-    if not inv_nuevo or inv_nuevo.cantidad < cambio.cantidad_nueva:
-        raise HTTPException(status_code=400, detail="Stock insuficiente en sucursal para la nueva prenda solicitada")
-    inv_nuevo.cantidad -= cambio.cantidad_nueva
-
-    # 3. Calcular diferencia de precio
-    prod_anterior = db.query(Producto).filter_by(id=cambio.producto_devuelto_id).first()
-    prod_nuevo = db.query(Producto).filter_by(id=cambio.producto_nuevo_id).first()
-    precio_ant = (prod_anterior.precio if prod_anterior else 0) * cambio.cantidad_devuelta
-    precio_nuev = (prod_nuevo.precio if prod_nuevo else 0) * cambio.cantidad_nueva
-    diferencia = precio_nuev - precio_ant
-
-    # 4. Registrar CambioPrenda
-    db_cambio = models.CambioPrenda(
-        empresa_id=cambio.empresa_id or venta.empresa_id,
-        venta_id=cambio.venta_id,
-        sucursal_id=cambio.sucursal_id,
-        usuario_id=cambio.usuario_id,
-        producto_devuelto_id=cambio.producto_devuelto_id,
-        talla_devuelta_id=cambio.talla_devuelta_id,
-        color_devuelto_id=cambio.color_devuelto_id,
-        cantidad_devuelta=cambio.cantidad_devuelta,
-        producto_nuevo_id=cambio.producto_nuevo_id,
-        talla_nueva_id=cambio.talla_nueva_id,
-        color_nuevo_id=cambio.color_nuevo_id,
-        cantidad_nueva=cambio.cantidad_nueva,
-        diferencia_precio=diferencia,
-        motivo=cambio.motivo,
-        estado="Aprobado",
-        fecha_cambio=datetime.utcnow()
+    raise HTTPException(
+        410,
+        "Registre una nota en /devoluciones/crear-nota y complétela en /devoluciones/notas/{id}/completar para aplicar la política y conservar el comprobante",
     )
-    db.add(db_cambio)
-    db.commit()
-    db.refresh(db_cambio)
-    return db_cambio
+
 
 def get_cambios_prendas(db: Session, empresa_id: Optional[int] = None):
     query = db.query(models.CambioPrenda)
@@ -253,22 +201,26 @@ def get_cambios_prendas(db: Session, empresa_id: Optional[int] = None):
         query = query.filter(models.CambioPrenda.empresa_id == empresa_id)
     return query.order_by(models.CambioPrenda.id.desc()).all()
 
+
 def get_ventas(db: Session, empresa_id: Optional[int] = None):
     query = db.query(models.Venta)
     if empresa_id is not None:
         query = query.filter(models.Venta.empresa_id == empresa_id)
     return query.order_by(models.Venta.id.desc()).all()
 
+
 def get_reportes(db: Session, empresa_id: Optional[int] = None):
-    query = db.query(models.Venta).filter(models.Venta.estado_sincronizacion == "CONFIRMADA")
+    query = db.query(models.Venta).filter(
+        models.Venta.estado_sincronizacion == "CONFIRMADA"
+    )
     if empresa_id is not None:
         query = query.filter(models.Venta.empresa_id == empresa_id)
-        
+
     ventas = query.all()
     total_ingresos = sum(v.total for v in ventas) if ventas else 0
     total_ventas = len(ventas)
     ticket_promedio = total_ingresos / total_ventas if total_ventas > 0 else 0
-    
+
     return {
         "total_ingresos": total_ingresos,
         "total_ventas": total_ventas,
@@ -277,5 +229,5 @@ def get_reportes(db: Session, empresa_id: Optional[int] = None):
             "Efectivo": len([v for v in ventas if v.metodo_pago == "Efectivo"]),
             "QR": len([v for v in ventas if v.metodo_pago == "QR"]),
             "Stripe": len([v for v in ventas if v.metodo_pago == "Stripe"]),
-        }
+        },
     }

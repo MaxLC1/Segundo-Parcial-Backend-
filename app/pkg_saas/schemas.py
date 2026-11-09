@@ -1,6 +1,7 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, EmailStr
 from typing import Optional, List
 from datetime import datetime
+
 
 class PlanBase(BaseModel):
     nombre: str
@@ -12,8 +13,10 @@ class PlanBase(BaseModel):
     permite_cambios_prendas: bool = True
     activo: bool = True
 
+
 class PlanCreate(PlanBase):
     pass
+
 
 class PlanOut(PlanBase):
     id: int
@@ -21,6 +24,7 @@ class PlanOut(PlanBase):
 
     class Config:
         from_attributes = True
+
 
 class EmpresaBase(BaseModel):
     nombre: str
@@ -32,8 +36,13 @@ class EmpresaBase(BaseModel):
     logo_url: Optional[str] = None
     activa: bool = True
 
+
 class EmpresaCreate(EmpresaBase):
-    plan_id: Optional[int] = 1 # Por defecto Básico
+    admin_nombre: str
+    admin_email: EmailStr
+    admin_password: str = Field(min_length=8, max_length=72)
+    plan_id: Optional[int] = 1  # Por defecto Básico
+
 
 class EmpresaUpdate(BaseModel):
     nombre: Optional[str] = None
@@ -42,6 +51,7 @@ class EmpresaUpdate(BaseModel):
     direccion_fiscal: Optional[str] = None
     logo_url: Optional[str] = None
     activa: Optional[bool] = None
+
 
 class SuscripcionBase(BaseModel):
     empresa_id: int
@@ -52,11 +62,13 @@ class SuscripcionBase(BaseModel):
     auto_renovacion: bool = True
     notas: Optional[str] = None
 
+
 class SuscripcionCreate(BaseModel):
     empresa_id: int
     plan_id: int
-    dias_duracion: int = 365
+    dias_duracion: int = Field(default=365, gt=0, le=3650)
     notas: Optional[str] = None
+
 
 class SuscripcionOut(SuscripcionBase):
     id: int
@@ -65,6 +77,7 @@ class SuscripcionOut(SuscripcionBase):
     class Config:
         from_attributes = True
 
+
 class EmpresaOut(EmpresaBase):
     id: int
     created_at: Optional[datetime] = None
@@ -72,6 +85,7 @@ class EmpresaOut(EmpresaBase):
 
     class Config:
         from_attributes = True
+
 
 class LimitesEmpresaOut(BaseModel):
     empresa_id: int

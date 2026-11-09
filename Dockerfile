@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
 
 # Copiar todo el código de la aplicación
 COPY ./app /code/app
+COPY ./scripts /code/scripts
 COPY ./alembic /code/alembic
 COPY ./alembic.ini /code/alembic.ini
 COPY ./seed.py /code/seed.py

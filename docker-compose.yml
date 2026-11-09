@@ -7,12 +7,17 @@ services:
     restart: always
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD in .env}
       POSTGRES_DB: fashionstore_ar
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d fashionstore_ar"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   api:
     build: .
@@ -21,15 +26,20 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql://postgres:postgrespassword@db:5432/fashionstore_ar
-      - API_BASE_URL=http://34.230.18.9:8000
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD in .env}@db:5432/fashionstore_ar
+      - API_BASE_URL=${API_BASE_URL:-http://localhost:8000}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?Define JWT_SECRET_KEY in .env}
+      - REPORT_AI_URL=${REPORT_AI_URL:-}
+      - REPORT_AI_MODEL=${REPORT_AI_MODEL:-}
+      - REPORT_AI_KEY=${REPORT_AI_KEY:-}
     volumes:
       - uploads_data:/code/uploads
     depends_on:
-      - db
-    # Ejecutamos las migraciones automticamente antes de levantar el servidor
+      db:
+        condition: service_healthy
+    # Bootstrap aditivo: no ejecuta los seeds demostrativos que cambian datos.
     command: >
-      bash -c "alembic upgrade head && 
+      bash -c "python -m scripts.bootstrap && 
                uvicorn app.main:app --host 0.0.0.0 --port 8000"
 
 volumes:
