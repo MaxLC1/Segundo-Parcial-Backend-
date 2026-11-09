@@ -15,6 +15,9 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/v1/seguridad/login")
 def get_current_user(
     token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
 ):
+    if "actor" in db.info and db.info["actor"] is not None:
+        return db.info["actor"]
+
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="No se pudieron validar las credenciales",

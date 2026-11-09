@@ -206,7 +206,17 @@ def scope_queries(state):
     statement = state.statement
     for mapper in Base.registry.mappers:
         cls = mapper.class_
-        if hasattr(cls, "empresa_id"):
+        if cls.__name__ == "Usuario":
+            from sqlalchemy import or_
+
+            statement = statement.options(
+                with_loader_criteria(
+                    cls,
+                    or_(cls.empresa_id == tenant, cls.empresa_id == None),
+                    include_aliases=True,
+                )
+            )
+        elif hasattr(cls, "empresa_id"):
             statement = statement.options(
                 with_loader_criteria(
                     cls, cls.empresa_id == tenant, include_aliases=True

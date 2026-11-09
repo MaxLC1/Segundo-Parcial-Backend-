@@ -114,15 +114,22 @@ def mis_notas(db: Session = Depends(get_db)):
 
 
 @cliente.get("/compras")
-def mis_compras(db: Session = Depends(get_db)):
+def mis_compras(limit: int = 10, db: Session = Depends(get_db)):
     from app.pkg_ventas.models import Venta
     from app.pkg_ventas.schemas import VentaOut
 
     return [
         VentaOut.model_validate(v)
         for v in db.query(Venta)
-        .filter_by(usuario_id=db.info["actor"].id, estado_sincronizacion="CONFIRMADA")
+        .filter(
+            Venta.usuario_id == db.info["actor"].id,
+            or_(
+                Venta.estado_sincronizacion != "RECHAZADA",
+                Venta.estado_sincronizacion == None,
+            ),
+        )
         .order_by(Venta.id.desc())
+        .limit(limit)
         .all()
     ]
 
