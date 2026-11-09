@@ -32,6 +32,7 @@ class PoliticaDevolucionBase(BaseModel):
     nombre: str = "Política Oficial de Devoluciones y Cambios"
     tipo_reembolso_menor_valor: Literal[
         "CUPON_CREDITO",
+        "CUPON",
         "REEMBOLSO_50_PCT",
         "REEMBOLSO_100_PCT",
         "REEMBOLSO_PORCENTAJE",
