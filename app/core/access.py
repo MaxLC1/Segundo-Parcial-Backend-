@@ -65,6 +65,26 @@ async def authorize(request: Request, db: Session = Depends(get_db)):
     role = role_of(user)
     db.info["actor"] = user
     db.info["role"] = role
+    requested_empresa = request.query_params.get(
+        "empresa_id"
+    ) or request.path_params.get("empresa_id")
+    if method == "POST" and path in {
+        "/api/v1/ia/reporte-generativo",
+        "/api/v1/ia/ml/predecir-demanda",
+    }:
+        try:
+            body = await request.json()
+        except ValueError:
+            raise HTTPException(422, "Solicitud JSON inválida")
+        body_empresa = body.get("empresa_id") if isinstance(body, dict) else None
+        if body_empresa is not None:
+            if requested_empresa is not None and str(requested_empresa) != str(
+                body_empresa
+            ):
+                raise HTTPException(
+                    422, "La empresa de la URL no coincide con la solicitud"
+                )
+            requested_empresa = body_empresa
     if login:
         return
     if role == PLATFORM:
@@ -81,11 +101,10 @@ async def authorize(request: Request, db: Session = Depends(get_db)):
         if public:
             db.info["tenant_id"] = 1
             return
-        requested_empresa = request.query_params.get("empresa_id")
-        if requested_empresa:
+        if requested_empresa is not None:
             try:
                 tenant = int(requested_empresa)
-            except ValueError:
+            except (ValueError, TypeError):
                 raise HTTPException(422, "Empresa inválida")
             empresa = db.query(Empresa).filter_by(id=tenant, activa=True).first()
             if not empresa:
@@ -94,7 +113,9 @@ async def authorize(request: Request, db: Session = Depends(get_db)):
             db.info["platform_audit"] = True
             return
         # Si no especificó empresa_id, asignamos la primera empresa activa por defecto para auditoría
-        primera_empresa = db.query(Empresa).filter_by(activa=True).order_by(Empresa.id.asc()).first()
+        primera_empresa = (
+            db.query(Empresa).filter_by(activa=True).order_by(Empresa.id.asc()).first()
+        )
         if primera_empresa:
             db.info["tenant_id"] = primera_empresa.id
             db.info["platform_audit"] = True
@@ -117,9 +138,7 @@ async def authorize(request: Request, db: Session = Depends(get_db)):
     if not empresa:
         deny("Empresa inactiva o inexistente")
     db.info["tenant_id"] = tenant
-    requested = request.query_params.get("empresa_id") or request.path_params.get(
-        "empresa_id"
-    )
+    requested = requested_empresa
     if requested is not None and str(requested) != str(tenant):
         deny("No puede acceder a otra empresa")
     if user and role == "Cliente":

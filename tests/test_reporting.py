@@ -73,7 +73,7 @@ def test_subscription_expiry_and_cross_tenant_reports(setup):
             json={"query": "Ventas por sucursal", "empresa_id": 2},
             headers=auth(),
         ).status_code
-        == 404
+        == 403
     )
     with factory() as db:
         db.query(Suscripcion).filter_by(empresa_id=1).one().fecha_vencimiento = (
