@@ -20,6 +20,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
+from .export_charts import add_excel_chart, pdf_charts
 
 # -- Machine Learning --
 from sklearn.linear_model import LinearRegression
@@ -92,6 +93,7 @@ def exportar_reporte_excel(datos: schemas.ConsultaReporteIAResponse) -> bytes:
         col_letter = openpyxl.utils.get_column_letter(col[0].column)
         ws.column_dimensions[col_letter].width = max(max_len + 3, 14)
 
+    add_excel_chart(wb, datos)
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
@@ -157,6 +159,8 @@ def exportar_reporte_pdf(datos: schemas.ConsultaReporteIAResponse) -> bytes:
         )
     )
     story.append(Spacer(1, 12))
+
+    story.extend(pdf_charts(datos, styles))
 
     # Construir tabla
     tabla_data = [datos.columnas]
