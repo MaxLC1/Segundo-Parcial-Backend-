@@ -9,7 +9,7 @@ import json
 import os
 import re
 import unicodedata
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 import httpx
 from fastapi import HTTPException
@@ -27,6 +27,7 @@ class ReportPlan(BaseModel):
     tipo: Literal[
         "ventas_sucursal",
         "top_productos",
+        "top_productos_sucursal",
         "stock_critico",
         "ingresos_categoria",
         "ventas_tiempo",
@@ -54,13 +55,17 @@ def normalize(value):
     )
 
 
+def today_bolivia():
+    return datetime.now(timezone(timedelta(hours=-4))).date()
+
+
 def local_plan(question):
     q = normalize(question)
     plan = {}
     if any(w in q for w in ["stock", "existencia", "inventario"]):
         plan["tipo"] = "stock_critico"
     elif any(w in q for w in ["mas vendido", "top ", "populares"]):
-        plan["tipo"] = "top_productos"
+        plan["tipo"] = "top_productos_sucursal" if "sucursal" in q else "top_productos"
     elif "categoria" in q:
         plan["tipo"] = "ingresos_categoria"
     elif "sucursal" in q or "compar" in q:
@@ -72,7 +77,7 @@ def local_plan(question):
             422,
             "Especifique ventas por sucursal, productos más vendidos, existencias, ingresos por categoría o ventas por período",
         )
-    today = date.today()
+    today = today_bolivia()
     dates = re.findall(r"\b\d{4}-\d{2}-\d{2}\b", q)
     if dates:
         plan["desde"] = dates[0]
@@ -127,9 +132,13 @@ def local_plan(question):
             if period[2] == "dias":
                 plan.update(desde=today - timedelta(days=n - 1), hasta=today)
             else:
-                month_index = today.year * 12 + today.month - 1 - (n - 1)
+                month_index = today.year * 12 + today.month - 1 - n
+                year, month = month_index // 12, month_index % 12 + 1
                 plan.update(
-                    desde=date(month_index // 12, month_index % 12 + 1, 1), hasta=today
+                    desde=date(
+                        year, month, min(today.day, calendar.monthrange(year, month)[1])
+                    ),
+                    hasta=today,
                 )
     for label, key in [
         ("sucursal", "sucursal_id"),
@@ -173,7 +182,8 @@ def plan_report(question):
                     {
                         "role": "system",
                         "content": 'Interpreta la solicitud de reporte. Devuelve únicamente JSON conforme al esquema. No generes SQL. Si no corresponde, devuelve {"error":"Solicitud no soportada"}. Hoy es '
-                        + date.today().isoformat()
+                        + today_bolivia().isoformat()
+                        + ". Para productos más vendidos agrupados por sucursal usa top_productos_sucursal: el límite se aplica POR CADA sucursal, ordenando por unidades. Últimos N meses significa desde el mismo día N meses atrás hasta hoy, inclusive, ajustando al último día si no existe. No confundas agrupación por sucursal con filtrar una sucursal. "
                         + ". Esquema: "
                         + json.dumps(ReportPlan.model_json_schema()),
                     },
@@ -191,7 +201,21 @@ def plan_report(question):
                 422,
                 "La solicitud es ambigua o no está soportada. Indique tipo de reporte, período y filtros.",
             )
-        return ReportPlan.model_validate(payload), "modelo_ia"
+        plan = ReportPlan.model_validate(payload)
+        q = normalize(question)
+        if (
+            plan.tipo == "top_productos"
+            and "sucursal" in q
+            and any(w in q for w in ["agrupad", "por sucursal", "cada sucursal"])
+        ):
+            plan.tipo = "top_productos_sucursal"
+        # One deterministic relative-date definition for model and local mode.
+        if re.search(
+            r"ultimos\s+(?:\d+|dos|tres|cuatro|cinco|seis)\s+meses", q
+        ) and not re.search(r"\d{4}-\d{2}-\d{2}", q):
+            dates = local_plan(question)
+            plan.desde, plan.hasta = dates.desde, dates.hasta
+        return plan, "modelo_ia"
     except HTTPException:
         raise
     except (httpx.HTTPError, ValueError, KeyError, IndexError):
@@ -306,6 +330,47 @@ def generate(db, request):
             columns = ["Sucursal", "Ingresos (BOB)"]
             title = "Ventas por sucursal"
             values = [[r[0], round(float(r[1] or 0), 2)] for r in rows]
+        elif plan.tipo == "top_productos_sucursal":
+            grouped = (
+                query.join(Sucursal, Sucursal.id == Venta.sucursal_id)
+                .with_entities(
+                    Sucursal.id.label("sucursal_id"),
+                    Sucursal.nombre.label("sucursal"),
+                    Producto.id.label("producto_id"),
+                    Producto.nombre.label("producto"),
+                    func.sum(DetalleVenta.cantidad).label("unidades"),
+                    func.sum(amount).label("importe"),
+                )
+                .group_by(Sucursal.id, Sucursal.nombre, Producto.id, Producto.nombre)
+                .subquery()
+            )
+            ranked = db.query(
+                grouped,
+                func.row_number()
+                .over(
+                    partition_by=grouped.c.sucursal_id,
+                    order_by=(grouped.c.unidades.desc(), grouped.c.producto_id.asc()),
+                )
+                .label("posicion"),
+            ).subquery()
+            rows = (
+                db.query(ranked)
+                .filter(ranked.c.posicion <= plan.limite)
+                .order_by(ranked.c.sucursal_id, ranked.c.posicion)
+                .all()
+            )
+            columns = ["Sucursal", "Posición", "Producto", "Unidades", "Ingresos (BOB)"]
+            title = f"Top {plan.limite} productos por sucursal"
+            values = [
+                [
+                    r.sucursal,
+                    r.posicion,
+                    r.producto,
+                    int(r.unidades),
+                    round(float(r.importe or 0), 2),
+                ]
+                for r in rows
+            ]
         elif plan.tipo == "top_productos":
             rows = (
                 query.with_entities(
@@ -357,13 +422,27 @@ def generate(db, request):
             columns = ["Período", "Ingresos (BOB)"]
             title = "Ventas por " + plan.agrupacion
             values = [[k, round(v, 2)] for k, v in grouped.items()]
-        labels = [str(v[0]) for v in values]
-        amounts = [v[1] if plan.tipo == "top_productos" else v[-1] for v in values]
+        labels = [
+            f"{v[0]} · {v[2]}" if plan.tipo == "top_productos_sucursal" else str(v[0])
+            for v in values
+        ]
+        amounts = [
+            v[3]
+            if plan.tipo == "top_productos_sucursal"
+            else v[1]
+            if plan.tipo == "top_productos"
+            else v[-1]
+            for v in values
+        ]
     narrative = (
         f"{len(values)} filas obtenidas de las operaciones reales de su empresa."
         if values
         else "No hay datos para los filtros solicitados."
     )
+    if plan.tipo == "top_productos_sucursal":
+        narrative += f" Hasta {plan.limite} productos por cada sucursal, ordenados por unidades vendidas. Las sucursales con menos productos vendidos muestran solo los disponibles."
+    if plan.desde or plan.hasta:
+        narrative += f" Período: {plan.desde or 'sin inicio'} al {plan.hasta or 'hoy'} (inclusive)."
     response = ConsultaReporteIAResponse(
         titulo=title,
         tipo_reporte=plan.tipo,
@@ -381,8 +460,8 @@ def generate(db, request):
             "labels": labels,
             "datasets": [
                 {
-                    "label": columns[1]
-                    if plan.tipo == "top_productos"
+                    "label": "Unidades"
+                    if plan.tipo in {"top_productos", "top_productos_sucursal"}
                     else columns[-1],
                     "data": amounts,
                 }

@@ -3,6 +3,7 @@ from sqlalchemy import func, desc, asc
 from datetime import datetime, timedelta
 import io
 import json
+from xml.sax.saxutils import escape
 import numpy as np
 from fastapi import HTTPException
 from typing import Dict, Any, List
@@ -143,7 +144,7 @@ def exportar_reporte_pdf(datos: schemas.ConsultaReporteIAResponse) -> bytes:
     story.append(
         Paragraph("FashionStore SaaS - Plataforma Empresarial", subtitle_style)
     )
-    story.append(Paragraph(datos.titulo, title_style))
+    story.append(Paragraph(escape(datos.titulo), title_style))
     story.append(
         Paragraph(
             f"Fecha de emisión: {datetime.utcnow().strftime('%d/%m/%Y %H:%M:%S')} UTC",
@@ -154,7 +155,7 @@ def exportar_reporte_pdf(datos: schemas.ConsultaReporteIAResponse) -> bytes:
 
     story.append(
         Paragraph(
-            f"<b>Interpretación Generativa (IA):</b> {datos.narrativa_ia}",
+            f"<b>Interpretación Generativa (IA):</b> {escape(datos.narrativa_ia)}",
             narrative_style,
         )
     )
@@ -163,12 +164,26 @@ def exportar_reporte_pdf(datos: schemas.ConsultaReporteIAResponse) -> bytes:
     story.extend(pdf_charts(datos, styles))
 
     # Construir tabla
-    tabla_data = [datos.columnas]
+    cell_style = ParagraphStyle(
+        "TableCell", parent=styles["Normal"], fontSize=8, leading=10
+    )
+    header_style = ParagraphStyle(
+        "TableHeader", parent=cell_style, textColor=colors.white
+    )
+    tabla_data = [[Paragraph(escape(col), header_style) for col in datos.columnas]]
     for fila in datos.filas:
-        fila_data = [str(fila.get(col, "")) for col in datos.columnas]
+        fila_data = [
+            Paragraph(escape(str(fila.get(col, ""))), cell_style)
+            for col in datos.columnas
+        ]
         tabla_data.append(fila_data)
 
-    t = Table(tabla_data)
+    widths = (
+        [125, 45, 170, 65, 135]
+        if datos.tipo_reporte == "top_productos_sucursal"
+        else [540 / max(len(datos.columnas), 1)] * len(datos.columnas)
+    )
+    t = Table(tabla_data, colWidths=widths, repeatRows=1)
     t.setStyle(
         TableStyle(
             [
