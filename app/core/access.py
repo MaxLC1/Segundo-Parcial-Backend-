@@ -98,9 +98,6 @@ async def authorize(request: Request, db: Session = Depends(get_db)):
         }
         if any(path.startswith(p) for p in audit_paths):
             return
-        if public:
-            db.info["tenant_id"] = 1
-            return
         if requested_empresa is not None:
             try:
                 tenant = int(requested_empresa)
