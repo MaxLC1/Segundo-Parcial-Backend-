@@ -21,7 +21,14 @@ from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
-from .export_charts import add_excel_chart, pdf_charts
+from .export_charts import add_excel_chart, pdf_charts, ranking_page_size
+from reportlab.platypus import (
+    BaseDocTemplate,
+    PageTemplate,
+    Frame,
+    NextPageTemplate,
+    PageBreak,
+)
 
 # -- Machine Learning --
 from sklearn.linear_model import LinearRegression
@@ -112,6 +119,22 @@ def exportar_reporte_pdf(datos: schemas.ConsultaReporteIAResponse) -> bytes:
         topMargin=36,
         bottomMargin=36,
     )
+    ranking = datos.tipo_reporte == "top_productos_sucursal" and bool(datos.filas)
+    if ranking:
+        wide = ranking_page_size(datos)
+        doc = BaseDocTemplate(buffer, pagesize=wide)
+        doc.addPageTemplates(
+            [
+                PageTemplate(
+                    id="chart",
+                    pagesize=wide,
+                    frames=[Frame(36, 36, wide[0] - 72, wide[1] - 72)],
+                ),
+                PageTemplate(
+                    id="table", pagesize=letter, frames=[Frame(30, 36, 552, 720)]
+                ),
+            ]
+        )
     story = []
 
     styles = getSampleStyleSheet()
@@ -162,6 +185,8 @@ def exportar_reporte_pdf(datos: schemas.ConsultaReporteIAResponse) -> bytes:
     story.append(Spacer(1, 12))
 
     story.extend(pdf_charts(datos, styles))
+    if ranking:
+        story.extend([NextPageTemplate("table"), PageBreak()])
 
     # Construir tabla
     cell_style = ParagraphStyle(
